@@ -39,7 +39,8 @@ mongoose.connect(MONGODB_URI, {
 })
 .catch((error) => {
   console.error('❌ MongoDB connection error:', error);
-  process.exit(1);
+  console.log('⚠️  Continuing without database connection for testing...');
+  // Don't exit - let the server run for testing
 });
 
 // Database schemas
