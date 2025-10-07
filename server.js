@@ -7,8 +7,6 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-console.log(`🔧 Environment PORT: ${process.env.PORT}`);
-console.log(`🔧 Using PORT: ${PORT}`);
 
 // Security middleware
 app.use(helmet());
@@ -37,12 +35,9 @@ mongoose.connect(MONGODB_URI, {
 })
 .then(() => {
   console.log('✅ Connected to MongoDB');
-  console.log(`📊 Database: ${mongoose.connection.name}`);
 })
 .catch((error) => {
   console.error('❌ MongoDB connection error:', error);
-  console.log('⚠️  Continuing without database connection for testing...');
-  // Don't exit - let the server run for testing
 });
 
 // Database schemas
@@ -156,6 +151,65 @@ const Offer = mongoose.model('Offer', offerSchema);
 const Chat = mongoose.model('Chat', chatSchema);
 const ChatMessage = mongoose.model('ChatMessage', chatMessageSchema);
 const TradeHistory = mongoose.model('TradeHistory', tradeHistorySchema);
+
+// Create database indexes for better performance
+const createIndexes = async () => {
+  try {
+    // User indexes
+    await User.collection.createIndex({ "id": 1 }, { unique: true });
+    await User.collection.createIndex({ "email": 1 }, { unique: true });
+    await User.collection.createIndex({ "tradeScore": -1 }); // For leaderboards
+    await User.collection.createIndex({ "level": -1 }); // For level-based queries
+    await User.collection.createIndex({ "carbonSaved": -1 }); // For environmental leaderboards
+    await User.collection.createIndex({ "createdAt": -1 }); // For recent users
+    
+    // Item indexes
+    await Item.collection.createIndex({ "id": 1 }, { unique: true });
+    await Item.collection.createIndex({ "ownerId": 1 }); // For user's items
+    await Item.collection.createIndex({ "category": 1 }); // For category filtering
+    await Item.collection.createIndex({ "isAvailable": 1 }); // For available items
+    await Item.collection.createIndex({ "createdAt": -1 }); // For recent items
+    await Item.collection.createIndex({ "name": "text", "description": "text" }); // For text search
+    await Item.collection.createIndex({ "ownerId": 1, "isAvailable": 1 }); // Compound index
+    
+    // Offer indexes
+    await Offer.collection.createIndex({ "id": 1 }, { unique: true });
+    await Offer.collection.createIndex({ "fromUserId": 1 }); // For user's sent offers
+    await Offer.collection.createIndex({ "toUserId": 1 }); // For user's received offers
+    await Offer.collection.createIndex({ "status": 1 }); // For status filtering
+    await Offer.collection.createIndex({ "requestedItemId": 1 }); // For item-based queries
+    await Offer.collection.createIndex({ "createdAt": -1 }); // For recent offers
+    await Offer.collection.createIndex({ "fromUserId": 1, "status": 1 }); // Compound index
+    await Offer.collection.createIndex({ "toUserId": 1, "status": 1 }); // Compound index
+    
+    // Chat indexes
+    await Chat.collection.createIndex({ "id": 1 }, { unique: true });
+    await Chat.collection.createIndex({ "participantIds": 1 }); // For user's chats
+    await Chat.collection.createIndex({ "lastMessageAt": -1 }); // For chat ordering
+    await Chat.collection.createIndex({ "createdAt": -1 }); // For recent chats
+    
+    // ChatMessage indexes
+    await ChatMessage.collection.createIndex({ "id": 1 }, { unique: true });
+    await ChatMessage.collection.createIndex({ "chatId": 1 }); // For chat messages
+    await ChatMessage.collection.createIndex({ "senderId": 1 }); // For user's messages
+    await ChatMessage.collection.createIndex({ "timestamp": -1 }); // For message ordering
+    await ChatMessage.collection.createIndex({ "chatId": 1, "timestamp": -1 }); // Compound index
+    
+    // TradeHistory indexes
+    await TradeHistory.collection.createIndex({ "id": 1 }, { unique: true });
+    await TradeHistory.collection.createIndex({ "participantIds": 1 }); // For user's trades
+    await TradeHistory.collection.createIndex({ "completedAt": -1 }); // For recent trades
+    await TradeHistory.collection.createIndex({ "offerId": 1 }); // For offer-based queries
+    await TradeHistory.collection.createIndex({ "carbonSaved": -1 }); // For environmental stats
+    
+    console.log('✅ Database indexes created successfully');
+  } catch (error) {
+    console.error('❌ Error creating database indexes:', error);
+  }
+};
+
+// Create indexes when database connection is established
+mongoose.connection.once('open', createIndexes);
 
 // API Routes
 
@@ -462,6 +516,47 @@ app.post('/api/v1/trades/history', async (req, res) => {
   }
 });
 
+// Admin endpoint to clean up items not attributed to users
+app.delete('/api/v1/admin/cleanup-orphaned-items', async (req, res) => {
+  try {
+    // Get all unique ownerIds from items
+    const itemsWithOwners = await Item.distinct('ownerId');
+    
+    // Get all user IDs
+    const allUsers = await User.distinct('id');
+    
+    // Find ownerIds that don't exist in users collection
+    const orphanedOwnerIds = itemsWithOwners.filter(ownerId => !allUsers.includes(ownerId));
+    
+    if (orphanedOwnerIds.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No orphaned items found',
+        deletedCount: 0
+      });
+    }
+    
+    // Delete items with orphaned ownerIds
+    const deleteResult = await Item.deleteMany({
+      ownerId: { $in: orphanedOwnerIds }
+    });
+    
+    res.json({
+      success: true,
+      message: `Cleaned up ${deleteResult.deletedCount} orphaned items`,
+      deletedCount: deleteResult.deletedCount,
+      orphanedOwnerIds: orphanedOwnerIds
+    });
+    
+  } catch (error) {
+    console.error('Error cleaning up orphaned items:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to clean up orphaned items'
+    });
+  }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Error:', err);
@@ -484,7 +579,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SwopTrader API Server running on port ${PORT}`);
   console.log(`📡 Health check: http://localhost:${PORT}/health`);
   console.log(`📚 API Base URL: http://localhost:${PORT}/api/v1`);
-  console.log(`🌐 Railway Domain: swoptrader-api-production.up.railway.app`);
 });
 
 // Graceful shutdown
