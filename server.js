@@ -482,6 +482,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SwopTrader API Server running on port ${PORT}`);
   console.log(`📡 Health check: http://localhost:${PORT}/health`);
   console.log(`📚 API Base URL: http://localhost:${PORT}/api/v1`);
+  console.log(`🌐 Railway Domain: swoptrader-api-production.up.railway.app`);
 });
 
 // Graceful shutdown
