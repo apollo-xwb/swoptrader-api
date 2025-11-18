@@ -316,7 +316,14 @@ const sendOfferNotification = async ({
   const recipient = await User.findOne({ id: recipientUserId }, { fcmTokens: 1 });
   const recipientTokens = recipient?.fcmTokens?.filter(Boolean) || [];
 
+  console.log(`📤 Sending offer notification to user ${recipientUserId}`);
+  console.log(`   Found ${recipientTokens.length} registered token(s)`);
+  if (recipientTokens.length > 0) {
+    console.log(`   Token preview: ${recipientTokens[0].substring(0, 20)}...`);
+  }
+
   if (!recipientTokens.length) {
+    console.log(`   ⚠️  No tokens found for user ${recipientUserId}`);
     return { skipped: true, reason: 'no_tokens' };
   }
 
@@ -342,7 +349,9 @@ const sendOfferNotification = async ({
     }
   });
 
+  console.log(`   ✅ Notification sent: successCount=${response.successCount}, failureCount=${response.failureCount}`);
   if (response.invalidTokens?.length) {
+    console.log(`   ⚠️  Found ${response.invalidTokens.length} invalid token(s), removing...`);
     await removeInvalidTokens(recipientUserId, response.invalidTokens);
   }
 
