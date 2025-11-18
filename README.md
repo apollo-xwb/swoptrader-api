@@ -70,19 +70,32 @@ npm start
 - `GET /api/v1/trades/history?userId=:userId` - Get user's trade history
 - `POST /api/v1/trades/history` - Create trade history entry
 
+### Push Notifications
+- `POST /api/v1/notifications/token` - Register FCM device token
+  - Body: `{ userId, token, deviceId? }`
+  - Registers a Firebase Cloud Messaging token for push notifications
+  
+- `POST /api/v1/notifications/offers` - Send offer notification
+  - Body: `{ offerId, recipientUserId, senderUserId, senderName, itemName?, message? }`
+  - Sends a push notification when a user receives a new trade offer
+
 ## Deployment
 
-### Railway (Recommended)
+### Render (Current)
+1. Create new Web Service on Render
+2. Connect GitHub repository
+3. Configure:
+   - **Build Command**: `npm install`
+   - **Start Command**: `npm start`
+   - **Root Directory**: `.` (leave empty or set to root)
+4. Add environment variables in Render dashboard
+5. Deploy automatically on git push
+
+### Railway (Legacy)
 1. Push code to GitHub
 2. Connect Railway to your GitHub repo
 3. Add environment variables in Railway dashboard
 4. Deploy automatically
-
-### Render
-1. Create new Web Service on Render
-2. Connect GitHub repository
-3. Add environment variables
-4. Deploy
 
 ## Environment Variables
 
@@ -90,6 +103,16 @@ npm start
 - `PORT` - Server port (default: 3000)
 - `ALLOWED_ORIGINS` - CORS allowed origins (comma-separated)
 - `NODE_ENV` - Environment (development/production)
+- `FIREBASE_SERVICE_ACCOUNT` - Base64-encoded Firebase service account JSON (for push notifications)
+- `FIREBASE_SERVICE_ACCOUNT_JSON` - Raw Firebase service account JSON (alternative to above)
+
+**Firebase Setup for Push Notifications:**
+1. Go to Firebase Console → Project Settings → Service Accounts
+2. Generate a new private key (downloads JSON file)
+3. Either:
+   - Base64 encode the JSON: `base64 -i service-account.json` (or use online tool)
+   - Set `FIREBASE_SERVICE_ACCOUNT` to the Base64 string
+   - OR set `FIREBASE_SERVICE_ACCOUNT_JSON` to the raw JSON (escape quotes if needed)
 
 ## Database Schema
 
@@ -108,5 +131,17 @@ The API uses MongoDB with the following collections:
 - **Helmet**: Security headers
 - **Input Validation**: Request body validation
 - **Error Handling**: Comprehensive error responses
+- **Firebase Admin SDK**: Secure push notification delivery
+
+## Push Notifications
+
+The API supports Firebase Cloud Messaging (FCM) for push notifications:
+
+- **Device Token Registration**: Users register their FCM tokens via `/api/v1/notifications/token`
+- **Offer Notifications**: Automatic notifications when offers are created
+- **Offline Support**: Notifications are queued and delivered when device comes online
+- **Multi-device Support**: Users can register multiple devices per account
+
+
 
 
