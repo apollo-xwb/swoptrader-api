@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const admin = require('firebase-admin');
 require('dotenv').config();
 
 const app = express();
@@ -25,6 +26,132 @@ app.use(limiter);
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// Firebase Admin / FCM helpers
+let firebaseMessaging = null;
+
+const getRawFirebaseCredential = () => process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT;
+
+const parseFirebaseCredential = () => {
+  const raw = getRawFirebaseCredential();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    try {
+      const decoded = Buffer.from(raw, 'base64').toString('utf8');
+      return JSON.parse(decoded);
+    } catch (innerError) {
+      console.error('❌ Invalid Firebase service account JSON provided via environment variable');
+      return null;
+    }
+  }
+};
+
+const initializeFirebaseMessaging = () => {
+  if (firebaseMessaging) {
+    return firebaseMessaging;
+  }
+
+  try {
+    if (!admin.apps.length) {
+      const credential = parseFirebaseCredential();
+      if (!credential) {
+        console.warn('⚠️  Firebase service account not configured. Push notifications are disabled.');
+        return null;
+      }
+
+      admin.initializeApp({
+        credential: admin.credential.cert(credential)
+      });
+      console.log('✅ Firebase Admin initialized for push notifications');
+    }
+
+    firebaseMessaging = admin.messaging();
+    return firebaseMessaging;
+  } catch (error) {
+    console.error('❌ Failed to initialize Firebase Admin SDK:', error);
+    return null;
+  }
+};
+
+const getFirebaseMessaging = () => firebaseMessaging || initializeFirebaseMessaging();
+
+const buildDataPayload = (data = {}) => {
+  return Object.entries(data).reduce((acc, [key, value]) => {
+    acc[key] = value === undefined || value === null ? '' : String(value);
+    return acc;
+  }, {});
+};
+
+const sendPushNotification = async ({ tokens, notification, data = {}, android = {} }) => {
+  const messaging = getFirebaseMessaging();
+  if (!messaging) {
+    throw new Error('Firebase messaging is not configured');
+  }
+
+  const uniqueTokens = [...new Set((tokens || []).filter(Boolean))];
+  if (!uniqueTokens.length) {
+    return { successCount: 0, failureCount: 0, invalidTokens: [] };
+  }
+
+  const chunkSize = 500;
+  const batches = [];
+  for (let i = 0; i < uniqueTokens.length; i += chunkSize) {
+    batches.push(uniqueTokens.slice(i, i + chunkSize));
+  }
+
+  let successCount = 0;
+  let failureCount = 0;
+  const invalidTokens = [];
+
+  for (const batch of batches) {
+    const response = await messaging.sendEachForMulticast({
+      tokens: batch,
+      notification,
+      data: buildDataPayload(data),
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: android.channelId || 'swoptrader_notifications',
+          sound: 'default',
+          tag: android.tag
+        }
+      },
+      apns: {
+        headers: {
+          'apns-priority': '10'
+        },
+        payload: {
+          aps: {
+            sound: 'default',
+            category: android.apnsCategory || 'SWOPTRADER_EVENT'
+          }
+        }
+      }
+    });
+
+    successCount += response.successCount;
+    failureCount += response.failureCount;
+
+    response.responses.forEach((result, index) => {
+      if (!result.success) {
+        const errorCode = result.error?.code || '';
+        if (
+          errorCode.includes('registration-token-not-registered') ||
+          errorCode.includes('invalid-registration-token')
+        ) {
+          invalidTokens.push(batch[index]);
+        }
+      }
+    });
+  }
+
+  return { successCount, failureCount, invalidTokens };
+};
 
 // MongoDB connection
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/swoptrader';
@@ -49,10 +176,17 @@ const userSchema = new mongoose.Schema({
   tradeScore: { type: Number, default: 0 },
   level: { type: Number, default: 1 },
   carbonSaved: { type: Number, default: 0 },
+  lastActive: { type: Date, default: Date.now },
   location: {
     latitude: Number,
     longitude: Number,
     address: String
+  },
+  fcmTokens: { type: [String], default: [] },
+  deviceTokens: {
+    type: Map,
+    of: String,
+    default: {}
   },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
@@ -151,6 +285,93 @@ const Offer = mongoose.model('Offer', offerSchema);
 const Chat = mongoose.model('Chat', chatSchema);
 const ChatMessage = mongoose.model('ChatMessage', chatMessageSchema);
 const TradeHistory = mongoose.model('TradeHistory', tradeHistorySchema);
+
+const removeInvalidTokens = async (userId, invalidTokens = []) => {
+  if (!invalidTokens.length) {
+    return;
+  }
+
+  try {
+    await User.updateOne(
+      { id: userId },
+      {
+        $pull: { fcmTokens: { $in: invalidTokens } },
+        $set: { updatedAt: new Date() }
+      }
+    );
+  } catch (error) {
+    console.error(`❌ Failed to prune invalid tokens for user ${userId}:`, error);
+  }
+};
+
+const sendOfferNotification = async ({
+  offerId,
+  recipientUserId,
+  senderUserId,
+  senderName,
+  itemName,
+  message
+}) => {
+  const resolvedSenderName = senderName || 'A SwopTrader user';
+  const recipient = await User.findOne({ id: recipientUserId }, { fcmTokens: 1 });
+  const recipientTokens = recipient?.fcmTokens?.filter(Boolean) || [];
+
+  if (!recipientTokens.length) {
+    return { skipped: true, reason: 'no_tokens' };
+  }
+
+  const response = await sendPushNotification({
+    tokens: recipientTokens,
+    notification: {
+      title: `${resolvedSenderName} sent you an offer`,
+      body: (message && message.trim().substring(0, 140)) || `New pitch on ${itemName || 'your listing'}`
+    },
+    data: {
+      type: 'offer',
+      offerId,
+      senderUserId,
+      senderName: resolvedSenderName,
+      recipientUserId,
+      itemName: itemName || '',
+      message: message || ''
+    },
+    android: {
+      channelId: 'swoptrader_offers',
+      tag: `offer_${offerId}`,
+      apnsCategory: 'SWOPTRADER_OFFER'
+    }
+  });
+
+  if (response.invalidTokens?.length) {
+    await removeInvalidTokens(recipientUserId, response.invalidTokens);
+  }
+
+  return response;
+};
+
+const queueOfferNotificationForOffer = async (offer) => {
+  if (!offer) {
+    return;
+  }
+
+  try {
+    const [sender, requestedItem] = await Promise.all([
+      User.findOne({ id: offer.fromUserId }, { name: 1 }),
+      Item.findOne({ id: offer.requestedItemId }, { name: 1 })
+    ]);
+
+    await sendOfferNotification({
+      offerId: offer.id,
+      recipientUserId: offer.toUserId,
+      senderUserId: offer.fromUserId,
+      senderName: sender?.name || 'A SwopTrader user',
+      itemName: requestedItem?.name || '',
+      message: offer.message || ''
+    });
+  } catch (error) {
+    console.error(`❌ Offer notification dispatch failed for ${offer.id}:`, error);
+  }
+};
 
 // Create database indexes for better performance
 const createIndexes = async () => {
@@ -267,6 +488,117 @@ app.put('/api/v1/users/:userId', async (req, res) => {
     res.json({ success: true, data: user });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Notification routes
+app.post('/api/v1/notifications/token', async (req, res) => {
+  try {
+    const { userId, token, deviceId } = req.body || {};
+
+    if (!userId || !token) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId and token are required'
+      });
+    }
+
+    const updatePayload = {
+      $addToSet: { fcmTokens: token },
+      $set: {
+        updatedAt: new Date(),
+        lastActive: new Date()
+      }
+    };
+
+    if (deviceId) {
+      updatePayload.$set[`deviceTokens.${deviceId}`] = token;
+    }
+
+    const user = await User.findOneAndUpdate(
+      { id: userId },
+      updatePayload,
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        tokens: user.fcmTokens,
+        registeredAt: new Date().toISOString()
+      },
+      message: 'Device token registered'
+    });
+  } catch (error) {
+    console.error('❌ Failed to register notification token:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to register device token'
+    });
+  }
+});
+
+app.post('/api/v1/notifications/offers', async (req, res) => {
+  try {
+    const {
+      offerId,
+      recipientUserId,
+      senderUserId,
+      senderName,
+      itemName,
+      message
+    } = req.body || {};
+
+    if (!offerId || !recipientUserId || !senderUserId || !senderName) {
+      return res.status(400).json({
+        success: false,
+        error: 'offerId, recipientUserId, senderUserId and senderName are required'
+      });
+    }
+
+    const result = await sendOfferNotification({
+      offerId,
+      recipientUserId,
+      senderUserId,
+      senderName,
+      itemName,
+      message
+    });
+
+    if (result.skipped) {
+      return res.status(404).json({
+        success: false,
+        error: 'Recipient has no registered notification tokens'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: result,
+      message: result.successCount
+        ? 'Notification dispatched'
+        : 'No valid device tokens available'
+    });
+  } catch (error) {
+    if (error.message === 'Firebase messaging is not configured') {
+      return res.status(503).json({
+        success: false,
+        error: 'Push notifications not configured on the server'
+      });
+    }
+
+    console.error('❌ Failed to send offer notification:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to send offer notification'
+    });
   }
 });
 
@@ -413,6 +745,7 @@ app.post('/api/v1/offers', async (req, res) => {
   try {
     const offer = new Offer(req.body);
     await offer.save();
+    queueOfferNotificationForOffer(offer);
     res.status(201).json({ success: true, data: offer });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
