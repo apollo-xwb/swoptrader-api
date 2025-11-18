@@ -2,6 +2,11 @@
 
 REST API server for the SwopTrader Android application.
 
+https://swoptrader-api.onrender.com/health
+
+<img width="1581" height="823" alt="image" src="https://github.com/user-attachments/assets/1ba958b3-b79c-4822-8b9c-c7123c8353c3" />
+
+
 ## Features
 
 - **Users Management**: Create, read, update user profiles
